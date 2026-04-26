@@ -1,1 +1,612 @@
 
+import javax.swing.*;
+import java.awt.*;
+import java.awt.event.*;
+import java.awt.geom.*;
+import java.util.ArrayList;
+import java.util.Iterator;
+import java.util.Random;
+
+public class PlaneWars extends JPanel implements ActionListener, KeyListener {
+
+    // --- 遊戲設定 ---
+    private final int WIDTH = 700;
+    private final int HEIGHT = 800;
+    private final int PLAYER_SIZE = 60;
+    private final int BIG_SIZE = 100; // 變大後的尺寸
+    private final int MAX_HP = 1000;
+
+    // 平衡參數
+    private final int BASE_BULLET_SPEED = 8;
+    private final int BUFFED_BULLET_SPEED = 16;
+    private final int PLAYER_SPEED = 7;
+    private final int METEOR_SPEED = 5;
+    private final int FIRE_RATE = 12;
+    private final int BULLET_DAMAGE = 15;
+    private final long BUFF_DURATION = 5000;
+
+    // --- 內部類別 ---
+
+    class Star {
+        int x, y, speed, size;
+        float alpha;
+
+        Star() {
+            reset(true);
+        }
+
+        void reset(boolean randomY) {
+            x = random.nextInt(WIDTH);
+            y = randomY ? random.nextInt(HEIGHT) : -10;
+            size = random.nextInt(3) + 1;
+            speed = size + random.nextInt(2);
+            alpha = 0.3f + random.nextFloat() * 0.7f;
+        }
+
+        void update() {
+            y += speed;
+            if (y > HEIGHT)
+                reset(false);
+        }
+
+        void draw(Graphics2D g) {
+            g.setColor(new Color(1f, 1f, 1f, alpha));
+            g.fillOval(x, y, size, size);
+        }
+    }
+
+    class Particle {
+        double x, y, vx, vy;
+        int life, maxLife, size;
+        Color color;
+
+        Particle(int x, int y, Color c) {
+            this.x = x;
+            this.y = y;
+            this.color = c;
+            double angle = random.nextDouble() * 2 * Math.PI;
+            double speed = random.nextDouble() * 3 + 1;
+            vx = Math.cos(angle) * speed;
+            vy = Math.sin(angle) * speed;
+            maxLife = 20 + random.nextInt(20);
+            life = maxLife;
+            size = 3 + random.nextInt(4);
+        }
+
+        boolean update() {
+            x += vx;
+            y += vy;
+            life--;
+            return life <= 0;
+        }
+
+        void draw(Graphics2D g) {
+            float alpha = (float) life / maxLife;
+            g.setColor(new Color(color.getRed() / 255f, color.getGreen() / 255f, color.getBlue() / 255f, alpha));
+            g.fillOval((int) x, (int) y, size, size);
+        }
+    }
+
+    class Meteor {
+        Polygon shape;
+        Rectangle rect;
+        int direction; // 1:右, -1:左
+        int type; // 0:普通, 1:加速(黃), 2:雙排(藍), 3:變大(紅-Debuff)
+        double rotation = 0, rotSpeed;
+
+        Meteor(int x, int y, int dir, int type) {
+            this.rect = new Rectangle(x, y, 50, 50);
+            this.direction = dir;
+            this.type = type;
+            this.rotSpeed = (random.nextDouble() - 0.5) * 0.1;
+            int nPoints = 6 + random.nextInt(4);
+            int[] xPoly = new int[nPoints], yPoly = new int[nPoints];
+            for (int i = 0; i < nPoints; i++) {
+                double angle = 2 * Math.PI * i / nPoints;
+                int r = 20 + random.nextInt(10);
+                xPoly[i] = (int) (Math.cos(angle) * r);
+                yPoly[i] = (int) (Math.sin(angle) * r);
+            }
+            this.shape = new Polygon(xPoly, yPoly, nPoints);
+        }
+    }
+
+    // --- 遊戲變數 ---
+    private enum GameState {
+        TITLE, PLAYING, GAMEOVER
+    }
+
+    private GameState currentState = GameState.TITLE;
+    private Timer timer;
+    private Random random;
+    private ArrayList<Star> stars;
+    private ArrayList<Particle> particles;
+    private ArrayList<Meteor> meteors;
+
+    // P1 & P2 狀態
+    private int p1X, p1Y, p1HP, p1Size;
+    private boolean p1Left, p1Right;
+    private ArrayList<Rectangle> p1Bullets;
+    private int p1Cooldown = 0;
+    private long p1BuffSpeed = 0, p1BuffDouble = 0, p1DebuffBig = 0;
+
+    private int p2X, p2Y, p2HP, p2Size;
+    private boolean p2Left, p2Right;
+    private ArrayList<Rectangle> p2Bullets;
+    private int p2Cooldown = 0;
+    private long p2BuffSpeed = 0, p2BuffDouble = 0, p2DebuffBig = 0;
+
+    private String winnerText = "";
+
+    public PlaneWars() {
+        setPreferredSize(new Dimension(WIDTH, HEIGHT));
+        setBackground(Color.BLACK);
+        setFocusable(true);
+        addKeyListener(this);
+        random = new Random();
+        stars = new ArrayList<>();
+        for (int i = 0; i < 100; i++)
+            stars.add(new Star());
+        particles = new ArrayList<>();
+        timer = new Timer(16, this);
+        timer.start();
+    }
+
+    private void initGame() {
+        p1Size = PLAYER_SIZE;
+        p1X = WIDTH / 2 - p1Size / 2;
+        p1Y = 80;
+        p1HP = MAX_HP;
+        p1Bullets = new ArrayList<>();
+        p1BuffSpeed = p1BuffDouble = p1DebuffBig = 0;
+
+        p2Size = PLAYER_SIZE;
+        p2X = WIDTH / 2 - p2Size / 2;
+        p2Y = HEIGHT - 80 - p2Size;
+        p2HP = MAX_HP;
+        p2Bullets = new ArrayList<>();
+        p2BuffSpeed = p2BuffDouble = p2DebuffBig = 0;
+
+        meteors = new ArrayList<>();
+        particles.clear();
+        p1Left = p1Right = p2Left = p2Right = false;
+    }
+
+    @Override
+    protected void paintComponent(Graphics g) {
+        super.paintComponent(g);
+        Graphics2D g2 = (Graphics2D) g;
+        g2.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+
+        drawBackground(g2);
+        if (currentState == GameState.TITLE) {
+            drawTitleScreen(g2);
+        } else {
+            drawGameObjects(g2);
+            drawUI(g2);
+            if (currentState == GameState.GAMEOVER)
+                drawGameOver(g2);
+        }
+    }
+
+    private void drawBackground(Graphics2D g) {
+        GradientPaint gp = new GradientPaint(0, 0, new Color(10, 10, 30), 0, HEIGHT, new Color(20, 20, 60));
+        g.setPaint(gp);
+        g.fillRect(0, 0, WIDTH, HEIGHT);
+        for (Star s : stars)
+            s.draw(g);
+    }
+
+    private void drawGameObjects(Graphics2D g) {
+        long now = System.currentTimeMillis();
+        for (Particle p : particles)
+            p.draw(g);
+
+        for (Meteor m : meteors) {
+            AffineTransform old = g.getTransform();
+            g.translate(m.rect.x + 25, m.rect.y + 25);
+            g.rotate(m.rotation);
+            if (m.type == 1) {
+                g.setColor(new Color(255, 220, 0)); // 黃
+                g.setStroke(new BasicStroke(3));
+                g.draw(m.shape);
+                g.setColor(new Color(255, 255, 100, 100));
+                g.fill(m.shape);
+                g.setColor(Color.WHITE);
+                g.setFont(new Font("Arial", Font.BOLD, 10));
+                g.drawString("SPD", -10, 5);
+            } else if (m.type == 2) {
+                g.setColor(new Color(0, 200, 255)); // 藍
+                g.setStroke(new BasicStroke(3));
+                g.draw(m.shape);
+                g.setColor(new Color(100, 220, 255, 100));
+                g.fill(m.shape);
+                g.setColor(Color.WHITE);
+                g.setFont(new Font("Arial", Font.BOLD, 10));
+                g.drawString("DBL", -10, 5);
+            } else if (m.type == 3) {
+                g.setColor(new Color(255, 50, 50)); // 紅 (Debuff)
+                g.setStroke(new BasicStroke(3));
+                g.draw(m.shape);
+                g.setColor(new Color(255, 100, 100, 100));
+                g.fill(m.shape);
+                g.setColor(Color.WHITE);
+                g.setFont(new Font("Arial", Font.BOLD, 10));
+                g.drawString("BIG", -10, 5);
+            } else {
+                g.setColor(Color.GRAY);
+                g.fill(m.shape);
+                g.setColor(Color.DARK_GRAY);
+                g.draw(m.shape);
+            }
+            g.setStroke(new BasicStroke(1));
+            g.setTransform(old);
+        }
+
+        // 畫戰機 (傳入目前的 Size)
+        drawCoolShip(g, p1X, p1Y, true, (now < p1BuffSpeed || now < p1BuffDouble) ? Color.ORANGE : Color.RED, p1Size);
+        for (Rectangle b : p1Bullets)
+            drawGlowingBullet(g, b, Color.RED);
+
+        drawCoolShip(g, p2X, p2Y, false, (now < p2BuffSpeed || now < p2BuffDouble) ? Color.CYAN : Color.BLUE, p2Size);
+        for (Rectangle b : p2Bullets)
+            drawGlowingBullet(g, b, Color.BLUE);
+    }
+
+    private void drawCoolShip(Graphics2D g, int x, int y, boolean isDown, Color c, int size) {
+        AffineTransform old = g.getTransform();
+        g.translate(x + size / 2, y + size / 2);
+        if (!isDown)
+            g.rotate(Math.PI);
+
+        // 噴火
+        int flicker = random.nextInt(10);
+        g.setColor(new Color(255, 150, 0, 180));
+        g.fillOval(-size / 6, -size / 2 - 10 - flicker, size / 3, size / 2);
+
+        // 機身
+        g.setColor(c);
+        int[] bx = { 0, size / 2, 0, -size / 2 };
+        int[] by = { size / 2, -size / 4, -size / 2 + 10, -size / 4 };
+        g.fillPolygon(bx, by, 4);
+
+        // 駕駛艙
+        g.setColor(new Color(200, 240, 255));
+        g.fillOval(-5, -5, 10, 10);
+
+        g.setTransform(old);
+    }
+
+    private void drawGlowingBullet(Graphics2D g, Rectangle b, Color c) {
+        g.setColor(new Color(c.getRed(), c.getGreen(), c.getBlue(), 100));
+        g.fillOval(b.x - 2, b.y - 2, b.width + 4, b.height + 4);
+        g.setColor(Color.WHITE);
+        g.fillRect(b.x, b.y, b.width, b.height);
+    }
+
+    private void drawUI(Graphics2D g) {
+        long now = System.currentTimeMillis();
+        g.setFont(new Font("Microsoft YaHei", Font.BOLD, 16));
+
+        drawOutlinedText(g, "P1", 20, 30, Color.RED);
+        drawStatusIcons(g, 60, 15, now < p1BuffSpeed, now < p1BuffDouble, now < p1DebuffBig);
+        drawModernBar(g, 20, 40, p1HP, MAX_HP, Color.RED);
+
+        drawOutlinedText(g, "P2", 20, HEIGHT - 50, Color.CYAN);
+        drawStatusIcons(g, 60, HEIGHT - 65, now < p2BuffSpeed, now < p2BuffDouble, now < p2DebuffBig);
+        drawModernBar(g, 20, HEIGHT - 40, p2HP, MAX_HP, Color.CYAN);
+    }
+
+    private void drawStatusIcons(Graphics2D g, int x, int y, boolean s, boolean d, boolean b) {
+        if (s) {
+            g.setColor(Color.YELLOW);
+            g.fillOval(x, y, 15, 15);
+            g.setColor(Color.BLACK);
+            g.setFont(new Font("Arial", Font.BOLD, 10));
+            g.drawString("S", x + 4, y + 11);
+            x += 20;
+        }
+        if (d) {
+            g.setColor(Color.CYAN);
+            g.fillOval(x, y, 15, 15);
+            g.setColor(Color.BLACK);
+            g.setFont(new Font("Arial", Font.BOLD, 10));
+            g.drawString("D", x + 4, y + 11);
+            x += 20;
+        }
+        if (b) {
+            g.setColor(Color.RED);
+            g.fillOval(x, y, 15, 15);
+            g.setColor(Color.WHITE);
+            g.setFont(new Font("Arial", Font.BOLD, 10));
+            g.drawString("B", x + 4, y + 11);
+        }
+    }
+
+    private void drawModernBar(Graphics2D g, int x, int y, int cur, int max, Color c) {
+        g.setColor(new Color(50, 50, 50));
+        g.fillRoundRect(x, y, 200, 15, 5, 5);
+        int w = (int) ((double) cur / max * 200);
+        g.setColor(c);
+        g.fillRoundRect(x, y, Math.max(0, w), 15, 5, 5);
+        g.setColor(Color.WHITE);
+        g.drawRoundRect(x, y, 200, 15, 5, 5);
+    }
+
+    // --- 修改：恢復美觀的標題介面，並加入紅色隕石規則 ---
+    private void drawTitleScreen(Graphics2D g) {
+        // 標題大字
+        g.setFont(new Font("Microsoft YaHei", Font.BOLD, 60));
+        String title = "打飛機大戰";
+        drawOutlinedText(g, title, (WIDTH - g.getFontMetrics().stringWidth(title)) / 2, HEIGHT / 3, Color.ORANGE);
+
+        // 副標題 (配合你的新功能改名為 GIANT THREAT)
+        g.setFont(new Font("Arial", Font.BOLD, 24));
+        String sub = "GIANT THREAT";
+        g.setColor(Color.CYAN);
+        g.drawString(sub, (WIDTH - g.getFontMetrics().stringWidth(sub)) / 2, HEIGHT / 3 + 45);
+
+        // 規則框 (半透明背景)
+        int boxX = 80, boxY = HEIGHT / 2 - 40, boxW = WIDTH - 160, boxH = 340;
+        g.setColor(new Color(0, 0, 0, 150));
+        g.fillRoundRect(boxX, boxY, boxW, boxH, 20, 20);
+        g.setColor(Color.WHITE);
+        g.drawRoundRect(boxX, boxY, boxW, boxH, 20, 20);
+
+        g.setFont(new Font("Microsoft YaHei", Font.PLAIN, 18));
+        int tx = boxX + 40;
+        int ty = boxY + 40;
+
+        g.setColor(Color.WHITE);
+        g.drawString("🔴 玩家 1 (上方): 按 A / D 移動", tx, ty);
+        g.drawString("🔵 玩家 2 (下方): 按 ← / → 移動", tx, ty + 40);
+        g.drawString("⚠️  打爆隕石取得效果:", tx, ty + 100);
+
+        // 規則說明 (包含你的新功能)
+        g.setColor(Color.YELLOW);
+        g.drawString("★ 黃色: 極速射擊 (Speed)", tx + 20, ty + 130);
+        g.setColor(Color.CYAN);
+        g.drawString("★ 藍色: 雙排火力 (Double)", tx + 20, ty + 160);
+        g.setColor(new Color(255, 80, 80)); // 亮紅色
+        g.drawString("★ 紅色: 巨大化 (Debuff! 容易中彈)", tx + 20, ty + 190);
+
+        // 閃爍的開始提示
+        if ((System.currentTimeMillis() / 500) % 2 == 0) {
+            g.setColor(Color.GREEN);
+            g.setFont(new Font("Arial", Font.BOLD, 30));
+            String start = "PRESS [ENTER] TO START";
+            g.drawString(start, (WIDTH - g.getFontMetrics().stringWidth(start)) / 2, HEIGHT - 80);
+        }
+    }
+
+    private void drawGameOver(Graphics2D g) {
+        g.setColor(new Color(0, 0, 0, 180));
+        g.fillRect(0, 0, WIDTH, HEIGHT);
+        g.setFont(new Font("Microsoft YaHei", Font.BOLD, 50));
+        drawOutlinedText(g, winnerText, (WIDTH - g.getFontMetrics().stringWidth(winnerText)) / 2, HEIGHT / 2,
+                Color.WHITE);
+
+        g.setColor(Color.LIGHT_GRAY);
+        g.setFont(new Font("Arial", Font.PLAIN, 20));
+        String hint = "Press [ENTER] to Restart";
+        g.drawString(hint, (WIDTH - g.getFontMetrics().stringWidth(hint)) / 2, HEIGHT / 2 + 60);
+    }
+
+    private void drawOutlinedText(Graphics2D g, String t, int x, int y, Color c) {
+        g.setColor(Color.BLACK);
+        g.drawString(t, x + 3, y + 3); // 陰影加深
+        g.setColor(c);
+        g.drawString(t, x, y);
+    }
+
+    @Override
+    public void actionPerformed(ActionEvent e) {
+        for (Star s : stars)
+            s.update();
+        if (currentState == GameState.PLAYING) {
+            updatePlayers();
+            handleShooting();
+            updateBullets();
+            updateMeteors();
+            updateParticles();
+            checkCollisions();
+        }
+        repaint();
+    }
+
+    private void updatePlayers() {
+        long now = System.currentTimeMillis();
+        // 判斷 Debuff 尺寸
+        p1Size = (now < p1DebuffBig) ? BIG_SIZE : PLAYER_SIZE;
+        p2Size = (now < p2DebuffBig) ? BIG_SIZE : PLAYER_SIZE;
+
+        if (p1Left && p1X > 0)
+            p1X -= PLAYER_SPEED;
+        if (p1Right && p1X < WIDTH - p1Size)
+            p1X += PLAYER_SPEED;
+        if (p2Left && p2X > 0)
+            p2X -= PLAYER_SPEED;
+        if (p2Right && p2X < WIDTH - p2Size)
+            p2X += PLAYER_SPEED;
+        for (Meteor m : meteors)
+            m.rotation += m.rotSpeed;
+    }
+
+    private void handleShooting() {
+        long now = System.currentTimeMillis();
+        if (++p1Cooldown >= FIRE_RATE) {
+            if (now < p1BuffDouble) {
+                p1Bullets.add(new Rectangle(p1X + 5, p1Y + p1Size, 8, 20));
+                p1Bullets.add(new Rectangle(p1X + p1Size - 15, p1Y + p1Size, 8, 20));
+            } else {
+                p1Bullets.add(new Rectangle(p1X + p1Size / 2 - 4, p1Y + p1Size, 8, 20));
+            }
+            p1Cooldown = 0;
+        }
+        if (++p2Cooldown >= FIRE_RATE) {
+            if (now < p2BuffDouble) {
+                p2Bullets.add(new Rectangle(p2X + 5, p2Y - 20, 8, 20));
+                p2Bullets.add(new Rectangle(p2X + p2Size - 15, p2Y - 20, 8, 20));
+            } else {
+                p2Bullets.add(new Rectangle(p2X + p2Size / 2 - 4, p2Y - 20, 8, 20));
+            }
+            p2Cooldown = 0;
+        }
+    }
+
+    private void updateBullets() {
+        long now = System.currentTimeMillis();
+        int s1 = (now < p1BuffSpeed) ? BUFFED_BULLET_SPEED : BASE_BULLET_SPEED;
+        for (int i = 0; i < p1Bullets.size(); i++) {
+            p1Bullets.get(i).y += s1;
+            if (p1Bullets.get(i).y > HEIGHT)
+                p1Bullets.remove(i--);
+        }
+        int s2 = (now < p2BuffSpeed) ? BUFFED_BULLET_SPEED : BASE_BULLET_SPEED;
+        for (int i = 0; i < p2Bullets.size(); i++) {
+            p2Bullets.get(i).y -= s2;
+            if (p2Bullets.get(i).y < -20)
+                p2Bullets.remove(i--);
+        }
+    }
+
+    private void updateMeteors() {
+        int chance = random.nextInt(1000);
+        if (chance < 30) {
+            int y = 200 + random.nextInt(HEIGHT - 400);
+            int dir = random.nextBoolean() ? 1 : -1;
+            int type = 0;
+            if (chance < 4)
+                type = 1; // 黃
+            else if (chance < 8)
+                type = 2; // 藍
+            else if (chance < 14)
+                type = 3; // 紅 (新增 Debuff 隕石)
+            meteors.add(new Meteor(dir == 1 ? -50 : WIDTH, y, dir, type));
+        }
+        for (int i = 0; i < meteors.size(); i++) {
+            meteors.get(i).rect.x += METEOR_SPEED * meteors.get(i).direction;
+            if (meteors.get(i).rect.x > WIDTH || meteors.get(i).rect.x < -50)
+                meteors.remove(i--);
+        }
+    }
+
+    private void checkCollisions() {
+        Rectangle r1 = new Rectangle(p1X, p1Y, p1Size, p1Size);
+        Rectangle r2 = new Rectangle(p2X, p2Y, p2Size, p2Size);
+        long now = System.currentTimeMillis();
+
+        // P1 子彈判定
+        Iterator<Rectangle> it1 = p1Bullets.iterator();
+        while (it1.hasNext()) {
+            Rectangle b = it1.next();
+            if (b.intersects(r2)) {
+                p2HP -= BULLET_DAMAGE;
+                it1.remove();
+                spawnExplosion(b.x, b.y, Color.CYAN);
+                checkWin();
+                continue;
+            }
+            for (int i = 0; i < meteors.size(); i++) {
+                Meteor m = meteors.get(i);
+                if (b.intersects(m.rect)) {
+                    if (m.type == 1)
+                        p1BuffSpeed = now + BUFF_DURATION;
+                    else if (m.type == 2)
+                        p1BuffDouble = now + BUFF_DURATION;
+                    else if (m.type == 3)
+                        p1DebuffBig = now + BUFF_DURATION; // P1 變大！
+                    spawnExplosion(m.rect.x + 25, m.rect.y + 25, Color.GRAY);
+                    meteors.remove(i);
+                    it1.remove();
+                    break;
+                }
+            }
+        }
+        // P2 子彈判定
+        Iterator<Rectangle> it2 = p2Bullets.iterator();
+        while (it2.hasNext()) {
+            Rectangle b = it2.next();
+            if (b.intersects(r1)) {
+                p1HP -= BULLET_DAMAGE;
+                it2.remove();
+                spawnExplosion(b.x, b.y, Color.ORANGE);
+                checkWin();
+                continue;
+            }
+            for (int i = 0; i < meteors.size(); i++) {
+                Meteor m = meteors.get(i);
+                if (b.intersects(m.rect)) {
+                    if (m.type == 1)
+                        p2BuffSpeed = now + BUFF_DURATION;
+                    else if (m.type == 2)
+                        p2BuffDouble = now + BUFF_DURATION;
+                    else if (m.type == 3)
+                        p2DebuffBig = now + BUFF_DURATION; // P2 變大！
+                    spawnExplosion(m.rect.x + 25, m.rect.y + 25, Color.GRAY);
+                    meteors.remove(i);
+                    it2.remove();
+                    break;
+                }
+            }
+        }
+    }
+
+    private void checkWin() {
+        if (p1HP <= 0 || p2HP <= 0) {
+            currentState = GameState.GAMEOVER;
+            winnerText = (p1HP > 0) ? "🔴 玩家 1 獲勝!" : "🔵 玩家 2 獲勝!";
+        }
+    }
+
+    private void spawnExplosion(int x, int y, Color c) {
+        for (int i = 0; i < 15; i++)
+            particles.add(new Particle(x, y, c));
+    }
+
+    private void updateParticles() {
+        particles.removeIf(p -> p.update());
+    }
+
+    public void keyPressed(KeyEvent e) {
+        int k = e.getKeyCode();
+        if (currentState == GameState.TITLE && k == KeyEvent.VK_ENTER) {
+            initGame();
+            currentState = GameState.PLAYING;
+        } else if (currentState == GameState.PLAYING) {
+            if (k == KeyEvent.VK_A)
+                p1Left = true;
+            if (k == KeyEvent.VK_D)
+                p1Right = true;
+            if (k == KeyEvent.VK_LEFT)
+                p2Left = true;
+            if (k == KeyEvent.VK_RIGHT)
+                p2Right = true;
+        } else if (currentState == GameState.GAMEOVER && k == KeyEvent.VK_ENTER)
+            currentState = GameState.TITLE;
+    }
+
+    public void keyReleased(KeyEvent e) {
+        int k = e.getKeyCode();
+        if (k == KeyEvent.VK_A)
+            p1Left = false;
+        if (k == KeyEvent.VK_D)
+            p1Right = false;
+        if (k == KeyEvent.VK_LEFT)
+            p2Left = false;
+        if (k == KeyEvent.VK_RIGHT)
+            p2Right = false;
+    }
+
+    public void keyTyped(KeyEvent e) {
+    }
+
+    public static void main(String[] args) {
+        JFrame f = new JFrame("打飛機大戰 - 巨型威脅");
+        f.add(new PlaneWars());
+        f.pack();
+        f.setDefaultCloseOperation(JFrame.EXIT_ON_CLOSE);
+        f.setLocationRelativeTo(null);
+        f.setVisible(true);
+    }
+}
